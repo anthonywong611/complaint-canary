@@ -1,0 +1,57 @@
+# Compose file for the cloud VMs. It ships inside the image and is extracted by
+# /opt/canary/deploy.sh, so the service definitions are versioned with the code.
+# CANARY_IMAGE is always an immutable digest reference.
+name: complaint-canary
+
+x-canary: &canary
+  image: ${CANARY_IMAGE:?written to image.env by deploy.sh}
+  env_file:
+    - /opt/canary/canary.env
+    - /opt/canary/image.env
+  environment:
+    # Read from Secret Manager by /opt/canary/compose.sh; not written to a file.
+    DAGSTER_PG_PASSWORD: ${DAGSTER_PG_PASSWORD:?use /opt/canary/compose.sh}
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: ${DAGSTER_PG_PASSWORD:?use /opt/canary/compose.sh}
+      POSTGRES_USER: dagster
+      POSTGRES_DB: dagster
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - /mnt/disks/canary-data/postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dagster -d dagster"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  webserver:
+    <<: *canary
+    command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-m", "complaint_canary.definitions"]
+    # Reachable only through an SSH tunnel over IAP; nothing listens on the VM's network interface.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  daemon:
+    <<: *canary
+    command: ["dagster-daemon", "run", "-m", "complaint_canary.definitions"]
+
+  # One-off runs: sudo /opt/canary/compose.sh run --rm pipeline canary run
+  pipeline:
+    <<: *canary
+    restart: "no"
+    profiles: ["job"]
+    command: ["canary", "run"]

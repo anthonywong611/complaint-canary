@@ -1,0 +1,68 @@
+version: 2
+
+models:
+  - name: stg_complaints
+    description: Current version of every complaint still in the CFPB database, typed and renamed.
+    columns:
+      - name: complaint_id
+        description: CFPB complaint identifier.
+        data_tests: [unique, not_null]
+      - name: received_date
+        description: Date the CFPB received the complaint.
+        data_tests: [not_null]
+      - name: company_name
+        description: Company name as CFPB currently spells it.
+      - name: company_name_normalized
+        description: Company name normalised for matching (see macros/company_name.sql).
+      - name: first_observed_date
+        description: Date of the first snapshot that contained the complaint. Null for the initial backfill.
+      - name: is_backfill
+        description: True when the complaint was already present in the first snapshot this environment applied.
+        data_tests: [not_null]
+
+  - name: stg_complaint_versions
+    description: Every observed version of every complaint, from the SCD2 snapshot.
+    columns:
+      - name: complaint_id
+        data_tests: [not_null]
+      - name: valid_from
+        data_tests: [not_null]
+
+  - name: stg_fdic_institutions
+    description: Active FDIC institutions with normalised names and total assets in US dollars.
+    columns:
+      - name: cert
+        data_tests: [unique, not_null]
+
+  - name: stg_census_state_population
+    description: State population estimates, one row per state FIPS code and year.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [state_fips, population_year]
+
+  - name: stg_snapshot_ledger
+    description: Snapshots that passed the integrity gate, each with the snapshot applied before it.
+    columns:
+      - name: snapshot_date
+        data_tests: [unique, not_null]
+
+unit_tests:
+  - name: normalises_bank_and_holding_company_names
+    description: >
+      Case, punctuation and legal suffixes are removed so that a complaint's company name
+      and the FDIC's spelling of it compare equal.
+    model: stg_fdic_institutions
+    given:
+      - input: source('raw', 'fdic_institutions')
+        rows:
+          - {cert: 1, institution_name: "JPMorgan Chase Bank, National Association", holding_company_name: "JPMORGAN CHASE&CO", total_assets_thousands: 1000}
+          - {cert: 2, institution_name: "Citibank, N.A.", holding_company_name: "CITIGROUP INC", total_assets_thousands: 2000}
+          - {cert: 3, institution_name: "The Huntington National Bank", holding_company_name: "BANK OF NY MELLON CORP THE", total_assets_thousands: 3000}
+          - {cert: 4, institution_name: "Sutton Bank", holding_company_name: null, total_assets_thousands: 4000}
+    expect:
+      rows:
+        - {cert: 1, institution_name_normalized: "JPMORGAN CHASE BANK", holding_company_name_normalized: "JPMORGAN CHASE", total_assets_usd: 1000000}
+        - {cert: 2, institution_name_normalized: "CITIBANK", holding_company_name_normalized: "CITIGROUP", total_assets_usd: 2000000}
+        - {cert: 3, institution_name_normalized: "HUNTINGTON NATIONAL BANK", holding_company_name_normalized: "BANK OF NY MELLON", total_assets_usd: 3000000}
+        - {cert: 4, institution_name_normalized: "SUTTON BANK", holding_company_name_normalized: null, total_assets_usd: 4000000}

@@ -1,0 +1,244 @@
+version: 2
+
+models:
+  - name: int_date_spine
+    description: One row per day from 2011-12-01, with the Monday that starts its week.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+
+  - name: int_fdic_entities
+    description: FDIC institutions with their holding-company group assets and flags used for name matching.
+    columns:
+      - name: cert
+        data_tests: [unique, not_null]
+
+  - name: int_company_resolved
+    description: >
+      One row per complaint company, resolved to an FDIC institution by override seed,
+      exact bank name or exact holding-company name. No fuzzy matching.
+    columns:
+      - name: company_key
+        data_tests: [unique, not_null]
+      - name: match_method
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [override, fdic_institution, fdic_holding, unmatched]
+      - name: entity_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [bank, credit_union, non_bank, unreviewed]
+
+  - name: int_complaints_classified
+    description: Complaints with surrogate keys and a fraud category from the taxonomy seed.
+    columns:
+      - name: fraud_category
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [scam, unauthorized_transaction, identity_theft, fraud_alert_handling, not_fraud]
+
+  - name: int_weekly_series_counts
+    description: >
+      Weekly fraud-complaint counts per series (a fraud category for one company or one
+      state), zero-filled, with the entity's total complaints and a maturity flag.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [series_key, week_start]
+
+  - name: int_alert_evaluations
+    description: The alert rule applied to every mature week of every series. See docs/alert-rule.md.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [series_key, week_start]
+    columns:
+      - name: evaluation_status
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [evaluated, insufficient_history]
+      - name: severity
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [none, medium, high, critical]
+
+unit_tests:
+  - name: classifies_labels_from_both_taxonomy_eras
+    description: A current-era scam label, a legacy identity-theft label and an unlisted label.
+    model: int_complaints_classified
+    given:
+      - input: ref('stg_complaints')
+        rows:
+          - {complaint_id: 1, received_date: "2026-08-03", issue: "Fraud or scam", sub_issue: null, company_name_normalized: "A BANK", state_code: "TX"}
+          - {complaint_id: 2, received_date: "2016-05-02", issue: "Identity theft / Fraud / Embezzlement", sub_issue: null, company_name_normalized: "A BANK", state_code: null}
+          - {complaint_id: 3, received_date: "2026-08-03", issue: "Managing an account", sub_issue: "Banking errors", company_name_normalized: "A BANK", state_code: "FL"}
+          - {complaint_id: 4, received_date: "2026-08-03", issue: "Getting a credit card", sub_issue: "Card opened as result of identity theft or fraud", company_name_normalized: "A BANK", state_code: "FL"}
+      - input: ref('fraud_taxonomy')
+        rows:
+          - {issue: "Fraud or scam", sub_issue: null, fraud_category: scam}
+          - {issue: "Identity theft / Fraud / Embezzlement", sub_issue: null, fraud_category: identity_theft}
+          - {issue: "Getting a credit card", sub_issue: "Card opened as result of identity theft or fraud", fraud_category: identity_theft}
+    expect:
+      rows:
+        - {complaint_id: 1, fraud_category: scam, is_fraud_related: true, taxonomy_era: current, geography_key: TX}
+        - {complaint_id: 2, fraud_category: identity_theft, is_fraud_related: true, taxonomy_era: legacy, geography_key: UNKNOWN}
+        - {complaint_id: 3, fraud_category: not_fraud, is_fraud_related: false, taxonomy_era: current, geography_key: FL}
+        - {complaint_id: 4, fraud_category: identity_theft, is_fraud_related: true, taxonomy_era: current, geography_key: FL}
+
+  - name: marks_weeks_mature_only_after_the_publication_window
+    description: >
+      With a snapshot on 2026-09-30 and a 15-day window, the week ending 2026-09-13 is
+      complete and the week ending 2026-09-20 is still provisional.
+    model: int_weekly_series_counts
+    overrides:
+      vars:
+        snapshot_date: "2026-09-30"
+        backtest_start: "2026-09-07"
+        baseline_weeks: 2
+        min_baseline_median: 1
+        maturity_days: 15
+    given:
+      - input: ref('int_complaints_classified')
+        rows:
+          - {received_date: "2026-09-08", company_key: c1, geography_key: TX, fraud_category: scam, is_fraud_related: true}
+          - {received_date: "2026-09-09", company_key: c1, geography_key: TX, fraud_category: not_fraud, is_fraud_related: false}
+          - {received_date: "2026-09-15", company_key: c1, geography_key: UNKNOWN, fraud_category: scam, is_fraud_related: true}
+      - input: ref('int_date_spine')
+        rows:
+          - {date_day: "2026-09-07", week_start: "2026-09-07"}
+          - {date_day: "2026-09-14", week_start: "2026-09-14"}
+          - {date_day: "2026-09-21", week_start: "2026-09-21"}
+          - {date_day: "2026-09-28", week_start: "2026-09-28"}
+          - {date_day: "2026-10-05", week_start: "2026-10-05"}
+    expect:
+      rows:
+        - {scope: company, entity_key: c1, fraud_category: scam, week_start: "2026-09-07", complaint_count: 1, entity_total_count: 2, is_mature: true}
+        - {scope: company, entity_key: c1, fraud_category: scam, week_start: "2026-09-14", complaint_count: 1, entity_total_count: 1, is_mature: false}
+        - {scope: company, entity_key: c1, fraud_category: scam, week_start: "2026-09-21", complaint_count: 0, entity_total_count: 0, is_mature: false}
+        - {scope: company, entity_key: c1, fraud_category: scam, week_start: "2026-09-28", complaint_count: 0, entity_total_count: 0, is_mature: false}
+        - {scope: state, entity_key: TX, fraud_category: scam, week_start: "2026-09-07", complaint_count: 1, entity_total_count: 2, is_mature: true}
+        - {scope: state, entity_key: TX, fraud_category: scam, week_start: "2026-09-14", complaint_count: 0, entity_total_count: 0, is_mature: false}
+        - {scope: state, entity_key: TX, fraud_category: scam, week_start: "2026-09-21", complaint_count: 0, entity_total_count: 0, is_mature: false}
+        - {scope: state, entity_key: TX, fraud_category: scam, week_start: "2026-09-28", complaint_count: 0, entity_total_count: 0, is_mature: false}
+
+  - name: applies_every_condition_of_the_alert_rule
+    description: >
+      Seven series evaluated for the week of 2026-09-07. spike: a clear rise. flat: a
+      perfectly flat baseline, so the MAD is zero and the square-root floor sets the
+      scale. sparse: baseline median under the volume floor. new: fewer than 12 baseline
+      weeks. flood: the company's complaints of every kind tripled, so the fraud share
+      did not rise. small: lift passes but the excess and z-score do not. state: the
+      same flood at state scope, where the share condition does not apply. Only the
+      last week of each series is flagged mature, so it alone is evaluated.
+    model: int_alert_evaluations
+    overrides:
+      vars:
+        baseline_weeks: 12
+        min_baseline_median: 5
+        min_z_score: 3.5
+        min_lift: 1.5
+        min_excess: 10
+        min_share_lift: 1.2
+        high_z_score: 5
+        critical_z_score: 8
+    given:
+      - input: ref('int_weekly_series_counts')
+        rows:
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-06-15", complaint_count: 9, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-06-22", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-06-29", complaint_count: 11, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-07-06", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-07-13", complaint_count: 9, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-07-20", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-07-27", complaint_count: 11, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-08-03", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-08-10", complaint_count: 9, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-08-17", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-08-24", complaint_count: 11, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-08-31", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: spike, scope: company, entity_key: spike, fraud_category: scam, week_start: "2026-09-07", complaint_count: 40, entity_total_count: 140, is_mature: true}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-06-15", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-06-22", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-06-29", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-07-06", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-07-13", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-07-20", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-07-27", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-08-03", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-08-10", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-08-17", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-08-24", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-08-31", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flat, scope: company, entity_key: flat, fraud_category: scam, week_start: "2026-09-07", complaint_count: 40, entity_total_count: 140, is_mature: true}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-06-15", complaint_count: 2, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-06-22", complaint_count: 3, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-06-29", complaint_count: 2, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-07-06", complaint_count: 1, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-07-13", complaint_count: 2, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-07-20", complaint_count: 3, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-07-27", complaint_count: 2, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-08-03", complaint_count: 1, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-08-10", complaint_count: 2, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-08-17", complaint_count: 3, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-08-24", complaint_count: 2, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-08-31", complaint_count: 1, entity_total_count: 100, is_mature: false}
+          - {series_key: sparse, scope: company, entity_key: sparse, fraud_category: scam, week_start: "2026-09-07", complaint_count: 30, entity_total_count: 130, is_mature: true}
+          - {series_key: new, scope: company, entity_key: new, fraud_category: scam, week_start: "2026-08-03", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: new, scope: company, entity_key: new, fraud_category: scam, week_start: "2026-08-10", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: new, scope: company, entity_key: new, fraud_category: scam, week_start: "2026-08-17", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: new, scope: company, entity_key: new, fraud_category: scam, week_start: "2026-08-24", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: new, scope: company, entity_key: new, fraud_category: scam, week_start: "2026-08-31", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: new, scope: company, entity_key: new, fraud_category: scam, week_start: "2026-09-07", complaint_count: 40, entity_total_count: 140, is_mature: true}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-06-15", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-06-22", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-06-29", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-07-06", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-07-13", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-07-20", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-07-27", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-08-03", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-08-10", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-08-17", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-08-24", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-08-31", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: flood, scope: company, entity_key: flood, fraud_category: scam, week_start: "2026-09-07", complaint_count: 30, entity_total_count: 300, is_mature: true}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-06-15", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-06-22", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-06-29", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-07-06", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-07-13", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-07-20", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-07-27", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-08-03", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-08-10", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-08-17", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-08-24", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-08-31", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: small, scope: company, entity_key: small, fraud_category: scam, week_start: "2026-09-07", complaint_count: 16, entity_total_count: 116, is_mature: true}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-06-15", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-06-22", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-06-29", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-07-06", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-07-13", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-07-20", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-07-27", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-08-03", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-08-10", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-08-17", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-08-24", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-08-31", complaint_count: 10, entity_total_count: 100, is_mature: false}
+          - {series_key: state, scope: state, entity_key: state, fraud_category: scam, week_start: "2026-09-07", complaint_count: 30, entity_total_count: 300, is_mature: true}
+    expect:
+      rows:
+        - {series_key: spike, week_start: "2026-09-07", evaluation_status: evaluated, is_alert: true, severity: critical}
+        - {series_key: flat, week_start: "2026-09-07", evaluation_status: evaluated, is_alert: true, severity: critical}
+        - {series_key: sparse, week_start: "2026-09-07", evaluation_status: insufficient_history, is_alert: false, severity: none}
+        - {series_key: new, week_start: "2026-09-07", evaluation_status: insufficient_history, is_alert: false, severity: none}
+        - {series_key: flood, week_start: "2026-09-07", evaluation_status: evaluated, is_alert: false, severity: none}
+        - {series_key: small, week_start: "2026-09-07", evaluation_status: evaluated, is_alert: false, severity: none}
+        - {series_key: state, week_start: "2026-09-07", evaluation_status: evaluated, is_alert: true, severity: high}

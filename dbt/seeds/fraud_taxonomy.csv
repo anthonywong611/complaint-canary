@@ -1,0 +1,51 @@
+issue,sub_issue,fraud_category,note
+Credit monitoring or identity protection,Problem with fraud alerts,fraud_alert_handling,
+Problem with credit report or credit score,Problem with fraud alerts or security freezes,fraud_alert_handling,
+Problem with fraud alerts or security freezes,,fraud_alert_handling,
+Attempts to collect debt not owed,Debt was result of identity theft,identity_theft,
+Cont'd attempts collect debt not owed,Debt resulted from identity theft,identity_theft,
+Getting a credit card,Card opened as result of identity theft or fraud,identity_theft,
+Getting a credit card,Card opened without my consent or knowledge,identity_theft,
+Getting a loan,Fraudulent loan,identity_theft,
+Getting a loan,Loan opened without my consent or knowledge,identity_theft,
+Getting a loan or lease,Fraudulent loan,identity_theft,
+Getting a loan or lease,Loan opened without my consent or knowledge,identity_theft,
+Identity theft / Fraud / Embezzlement,,identity_theft,
+Opening an account,Account opened as a result of fraud,identity_theft,
+Opening an account,Account opened without my consent or knowledge,identity_theft,
+Received a loan I didn't apply for,,identity_theft,
+Received a loan you didn't apply for,,identity_theft,
+Cont'd attempts collect debt not owed,Debt is not mine,not_fraud,Reviewed: debt dispute
+Credit monitoring or identity protection,,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity protection,Account terms and changes,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity protection,Billing dispute,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity protection,Insurance terms,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity protection,Problem cancelling or closing account,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity protection,Receiving unwanted marketing/advertising,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity theft protection services,,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity theft protection services,Billing dispute for services,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity theft protection services,Didn't receive services that were advertised,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity theft protection services,Problem canceling credit monitoring or identify theft protection service,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity theft protection services,Problem with product or service terms changing,not_fraud,Reviewed: dispute about a monitoring product
+Credit monitoring or identity theft protection services,Received unwanted marketing or advertising,not_fraud,Reviewed: dispute about a monitoring product
+False statements or representation,Impersonated an attorney or official,not_fraud,Reviewed: debt collector conduct
+False statements or representation,"Impersonated attorney, law enforcement, or government official",not_fraud,Reviewed: debt collector conduct
+Identity theft protection or other monitoring services,,not_fraud,Reviewed: dispute about a monitoring product
+Identity theft protection or other monitoring services,Billing dispute for services,not_fraud,Reviewed: dispute about a monitoring product
+Identity theft protection or other monitoring services,Didn't receive services that were advertised,not_fraud,Reviewed: dispute about a monitoring product
+Identity theft protection or other monitoring services,Problem canceling credit monitoring or identify theft protection service,not_fraud,Reviewed: dispute about a monitoring product
+Identity theft protection or other monitoring services,Problem with product or service terms changing,not_fraud,Reviewed: dispute about a monitoring product
+Identity theft protection or other monitoring services,Received unwanted marketing or advertising,not_fraud,Reviewed: dispute about a monitoring product
+Incorrect information on credit report,Information is not mine,not_fraud,Reviewed: credit-file dispute
+Incorrect information on your report,Information belongs to someone else,not_fraud,Reviewed: dominated by bulk credit-file disputes
+Problem with credit report or credit score,Credit monitoring or identity theft protection services,not_fraud,Reviewed: dispute about a monitoring product
+Fraud or scam,,scam,
+Lost or stolen check,,unauthorized_transaction,
+Lost or stolen money order,,unauthorized_transaction,
+Lost or stolen refund,,unauthorized_transaction,
+Problem with a lender or other company charging your account,Transaction was not authorized,unauthorized_transaction,
+Problem with a purchase or transfer,Charged for a purchase or transfer you did not make with the card,unauthorized_transaction,
+Problem with a purchase shown on your statement,Card was charged for something you did not purchase with the card,unauthorized_transaction,
+Unauthorized transactions or other transaction problem,,unauthorized_transaction,
+Unauthorized transactions/trans. issues,,unauthorized_transaction,
+Unauthorized withdrawals or charges,,unauthorized_transaction,

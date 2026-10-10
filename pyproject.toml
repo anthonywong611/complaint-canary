@@ -1,0 +1,56 @@
+[project]
+name = "complaint-canary"
+version = "0.1.0"
+description = "Fraud and scam early-warning signals from public consumer complaints"
+requires-python = ">=3.14"
+dependencies = [
+    "dagster>=1.13.26",
+    "dagster-dbt>=0.29.26",
+    "dagster-postgres>=0.29.26",
+    "dagster-webserver>=1.13.26",
+    "dbt-bigquery>=1.12.1",
+    "dbt-core>=1.12.5",
+    "dbt-duckdb>=1.11.0",
+    "duckdb>=1.5.6",
+    "google-cloud-bigquery>=3.46.1",
+    "google-cloud-logging>=3.17.0",
+    "google-cloud-storage>=3.1.1",
+    "httpx>=0.28.1",
+    "pyarrow>=26.0.0",
+    "pydantic-settings>=2.15.0",
+    # dagster-postgres still relies on psycopg2 being SQLAlchemy's default driver, which 2.1 changed.
+    "sqlalchemy>=2.0,<2.1",
+    "tenacity>=9.1.4",
+]
+
+[project.scripts]
+canary = "complaint_canary.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "respx>=0.23.1",
+    "ruff>=0.17.0",
+    "sqlfluff>=4.4.0",
+]
+
+[tool.dagster]
+module_name = "complaint_canary.definitions"
+code_location_name = "complaint_canary"
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "C4", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::dagster.BetaWarning", "ignore::dagster.PreviewWarning"]

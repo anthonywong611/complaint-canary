@@ -1,0 +1,11 @@
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!src
+!dbt
+!deploy
+dbt/target
+dbt/logs
+dbt/dbt_packages
+**/__pycache__

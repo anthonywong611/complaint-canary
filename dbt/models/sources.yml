@@ -1,0 +1,60 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Source data as delivered, loaded by the Python ingestion assets. All complaint columns are strings.
+    schema: "{{ env_var('CANARY_DATASET_PREFIX', '') }}raw"
+    tables:
+      - name: complaints_snapshot
+        description: >
+          Daily full snapshots of the CFPB Consumer Complaint Database, one partition per
+          snapshot date, kept for 7 days. The integrity gate tests in tests/integrity_gate
+          run against the newest partition before it may change history.
+        config:
+          loaded_at_field: "cast(snapshot_date as timestamp)"
+          freshness:
+            warn_after: {count: 36, period: hour}
+        columns:
+          - name: complaint_id
+            description: CFPB complaint identifier.
+          - name: date_received
+            description: Date the CFPB received the complaint (YYYY-MM-DD).
+          - name: product
+          - name: sub_product
+          - name: issue
+          - name: sub_issue
+          - name: company
+          - name: state
+          - name: zip_code
+          - name: tags
+          - name: submitted_via
+          - name: date_sent_to_company
+          - name: company_response
+          - name: company_public_response
+          - name: timely_response
+          - name: snapshot_date
+            description: Date of the source file this row came from.
+          - name: run_id
+            description: Pipeline run that loaded the row.
+      - name: fdic_institutions
+        description: Active FDIC-insured institutions from the BankFind API, replaced on each load.
+        columns:
+          - name: cert
+            description: FDIC certificate number.
+            data_tests: [unique, not_null]
+      - name: census_state_population
+        description: US Census Bureau state population estimates, one row per state and year.
+        columns:
+          - name: state_fips
+            data_tests: [not_null]
+          - name: population
+            data_tests: [not_null]
+
+  - name: ops
+    description: Operational tables written by the pipeline.
+    schema: "{{ env_var('CANARY_DATASET_PREFIX', '') }}ops"
+    tables:
+      - name: snapshot_ledger
+        description: One row per snapshot date, tracking it from landing to publication.
+      - name: load_audit
+        description: One row per pipeline step and run, with row counts and bytes billed.

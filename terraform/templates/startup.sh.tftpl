@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# VM start-up script. Runs on every boot and is safe to repeat.
+set -euo pipefail
+exec > >(tee -a /var/log/canary-startup.log) 2>&1
+
+CANARY_DIR=/opt/canary
+DATA_MOUNT=/mnt/disks/canary-data
+DATA_DEVICE=/dev/disk/by-id/google-canary-data
+
+mkdir -p "$CANARY_DIR" "$DATA_MOUNT"
+rm -f "$CANARY_DIR/ready"
+
+# --- Data disk: Dagster's Postgres lives here, apart from the disposable boot disk.
+if ! blkid "$DATA_DEVICE" > /dev/null 2>&1; then
+  mkfs.ext4 -m 0 -F -E lazy_itable_init=0,lazy_journal_init=0,discard "$DATA_DEVICE"
+fi
+if ! mountpoint -q "$DATA_MOUNT"; then
+  mount -o discard,defaults "$DATA_DEVICE" "$DATA_MOUNT"
+fi
+grep -q "$DATA_MOUNT" /etc/fstab || echo "$DATA_DEVICE $DATA_MOUNT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
+mkdir -p "$DATA_MOUNT/postgres"
+
+# --- Docker Engine and the Compose plugin.
+if ! command -v docker > /dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y ca-certificates curl
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  ARCH="$(dpkg --print-architecture)"
+  CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $CODENAME stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+fi
+
+# --- Ops Agent: disk and memory metrics for the alert policies.
+if ! dpkg -s google-cloud-ops-agent > /dev/null 2>&1; then
+  curl -fsSO https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
+  bash add-google-cloud-ops-agent-repo.sh --also-install || echo "Ops Agent install failed; continuing"
+  rm -f add-google-cloud-ops-agent-repo.sh
+fi
+
+# --- Environment for the containers. No secrets in this file.
+cat > "$CANARY_DIR/canary.env" << 'ENVFILE'
+CANARY_ENV=${environment}
+CANARY_WAREHOUSE=bigquery
+CANARY_GCP_PROJECT=${project_id}
+CANARY_BQ_LOCATION=${bq_location}
+CANARY_DATASET_PREFIX=${dataset_prefix}
+CANARY_LANDING_URI=gs://${landing_bucket}
+CANARY_SAMPLE_PERCENT=${sample_percent}
+CANARY_DBT_FULL_REFRESH=${dbt_full_refresh}
+CANARY_ENABLE_SCHEDULES=${enable_schedules}
+CANARY_SCD2_BACKUP_ENABLED=${enable_backups}
+CANARY_EVENT_SINK=cloud_logging
+CANARY_ZIP_POLICY_TAG=${zip_policy_tag}
+DAGSTER_PG_HOST=postgres
+DAGSTER_PG_USER=dagster
+DAGSTER_PG_DB=dagster
+ENVFILE
+touch "$CANARY_DIR/image.env"
+
+# --- Compose wrapper for operators: sudo /opt/canary/compose.sh ps | logs | run --rm pipeline canary status
+#     The database password goes from Secret Manager straight into the containers' environment.
+cat > "$CANARY_DIR/compose.sh" << 'COMPOSE'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/canary
+DAGSTER_PG_PASSWORD="$(gcloud secrets versions access latest --secret="${pg_secret_id}" --project="${project_id}")"
+export DAGSTER_PG_PASSWORD
+exec docker compose --env-file image.env "$@"
+COMPOSE
+chmod 750 "$CANARY_DIR/compose.sh"
+
+# --- Deploy script, called by GitHub Actions over SSH:
+#       sudo /opt/canary/deploy.sh <image@digest> <git-sha> [--run]
+cat > "$CANARY_DIR/deploy.sh" << 'DEPLOY'
+#!/usr/bin/env bash
+set -euo pipefail
+IMAGE="$1"
+GIT_SHA="$2"
+MODE="$${3:-}"
+cd /opt/canary
+
+gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://${registry_host}"
+docker pull "$IMAGE"
+
+# The compose file ships inside the image, so it is versioned with the code.
+docker run --rm --entrypoint cat "$IMAGE" /app/deploy/docker-compose.cloud.yaml > docker-compose.yaml
+printf 'CANARY_IMAGE=%s\nCANARY_GIT_SHA=%s\n' "$IMAGE" "$GIT_SHA" > image.env
+
+./compose.sh up -d --remove-orphans
+if [ "$MODE" = "--run" ]; then
+  ./compose.sh run --rm pipeline canary run
+fi
+docker image prune -af --filter "until=168h" > /dev/null || true
+DEPLOY
+chmod 750 "$CANARY_DIR/deploy.sh"
+
+# Containers restart on boot through their restart policy once Docker is up.
+systemctl enable --now docker
+touch "$CANARY_DIR/ready"
+echo "start-up complete"

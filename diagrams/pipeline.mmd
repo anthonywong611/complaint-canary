@@ -1,0 +1,14 @@
+flowchart TD
+  a[Download zip; record ETag, size, checksum] --> g{Newer than the last applied snapshot?}
+  g -- no --> q2[Refuse; alert]
+  g -- same file --> j
+  g -- yes --> b[Verify zip CRC and 15-column header]
+  b --> c[Stream to Parquet, fixed schema]
+  c --> d[Store in landing/cfpb/dt=YYYY-MM-DD]
+  d --> e[Load raw.complaints_snapshot partition]
+  e --> f{Integrity gate: dbt tests on the partition}
+  f -- fail --> q[Mark snapshot rejected; history and marts unchanged; alert]
+  f -- pass --> h[dbt snapshot: SCD2 by row hash]
+  h --> j[dbt build: staging, intermediate, marts + tests]
+  j -- tests pass --> l[Mark snapshot published; write digest]
+  j -- tests fail --> q3[No publication; alert]

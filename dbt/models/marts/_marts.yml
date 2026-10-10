@@ -1,0 +1,245 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: Calendar dimension.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: date_key, data_type: int64, description: "Date as YYYYMMDD.", data_tests: [unique, not_null]}
+      - {name: date_day, data_type: date}
+      - {name: week_start, data_type: date, description: "Monday of the week."}
+      - {name: year, data_type: int64}
+      - {name: month, data_type: int64}
+
+  - name: dim_company
+    description: >
+      One row per complaint company (after name normalisation), with its FDIC match.
+      FDIC attributes are current values, not as of each complaint.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: company_key, data_type: string, description: "Hash of the normalised company name.", data_tests: [unique, not_null]}
+      - {name: company_name, data_type: string, description: "Most common current spelling in CFPB data."}
+      - {name: company_name_normalized, data_type: string}
+      - {name: fdic_cert, data_type: int64, description: "FDIC certificate of the matched bank, or the largest bank in the matched holding group."}
+      - {name: fdic_name, data_type: string}
+      - name: match_method
+        data_type: string
+        description: How the company was resolved.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [override, fdic_institution, fdic_holding, unmatched]
+      - name: entity_type
+        data_type: string
+        description: bank, credit_union, non_bank, or unreviewed when nobody has classified it yet.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [bank, credit_union, non_bank, unreviewed]
+      - {name: asset_size_band, data_type: string, description: "Band of the holding group's total assets."}
+      - {name: charter_class, data_type: string}
+      - {name: total_assets_usd, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}", description: "Total assets of the holding group, in US dollars."}
+      - {name: is_bank, data_type: bool}
+      - {name: fdic_as_of_date, data_type: date, description: "Date the FDIC attributes were loaded."}
+
+  - name: dim_product
+    description: Product and sub-product as labelled by CFPB.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: product_key, data_type: string, data_tests: [unique, not_null]}
+      - {name: product, data_type: string}
+      - {name: sub_product, data_type: string}
+
+  - name: dim_issue
+    description: Issue and sub-issue as labelled by CFPB, with the fraud category assigned by the taxonomy seed.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: issue_key, data_type: string, data_tests: [unique, not_null]}
+      - {name: issue, data_type: string}
+      - {name: sub_issue, data_type: string}
+      - name: taxonomy_era
+        data_type: string
+        description: legacy (only used before 2017-04-24), current (only used since) or both.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [legacy, current, both]
+      - {name: fraud_category, data_type: string}
+
+  - name: dim_geography
+    description: States and territories, with the latest Census population estimate where one exists.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: geography_key, data_type: string, data_tests: [unique, not_null]}
+      - {name: state_code, data_type: string}
+      - {name: state_name, data_type: string}
+      - {name: population, data_type: int64}
+      - {name: population_year, data_type: int64}
+
+  - name: fct_complaints
+    description: One row per complaint currently in the CFPB database.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: complaint_id, data_type: int64, data_tests: [unique, not_null]}
+      - {name: received_date, data_type: date, description: "Date the CFPB received the complaint. Partition column."}
+      - name: received_date_key
+        data_type: int64
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_key}
+      - {name: sent_to_company_date_key, data_type: int64}
+      - name: company_key
+        data_type: string
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_company'), field: company_key}
+      - name: product_key
+        data_type: string
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_product'), field: product_key}
+      - name: issue_key
+        data_type: string
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_issue'), field: issue_key}
+      - name: geography_key
+        data_type: string
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_geography'), field: geography_key}
+      - name: zip_code
+        data_type: string
+        description: Consumer ZIP code as published by CFPB. Restricted by a BigQuery policy tag when one is configured.
+        policy_tags: "{{ ([env_var('CANARY_ZIP_POLICY_TAG')] if env_var('CANARY_ZIP_POLICY_TAG', '') else []) | as_native }}"
+      - name: fraud_category
+        data_type: string
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [scam, unauthorized_transaction, identity_theft, fraud_alert_handling, not_fraud]
+      - {name: is_fraud_related, data_type: bool}
+      - {name: submitted_via, data_type: string}
+      - {name: company_response, data_type: string}
+      - {name: is_timely_response, data_type: bool}
+      - {name: is_older_american, data_type: bool}
+      - {name: is_servicemember, data_type: bool}
+      - {name: days_to_send, data_type: int64, description: "Days between receipt and forwarding to the company."}
+      - {name: first_observed_date, data_type: date, description: "First snapshot that contained the complaint; null for the initial backfill."}
+      - {name: is_backfill, data_type: bool}
+
+  - name: fct_complaint_status_history
+    description: >
+      Every observed version of every complaint. Dates are when a change was seen in a
+      snapshot, not when it happened; it happened after previous_snapshot_date.
+    config:
+      contract: {enforced: true}
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [complaint_id, valid_from]
+    columns:
+      - {name: complaint_id, data_type: int64, data_tests: [not_null]}
+      - {name: valid_from, data_type: date, data_tests: [not_null]}
+      - {name: valid_to, data_type: date}
+      - {name: previous_snapshot_date, data_type: date}
+      - name: change_type
+        data_type: string
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [backfill, new, reappeared, status, attribute, status_and_attribute]
+      - {name: company_response, data_type: string}
+      - {name: company_public_response, data_type: string}
+      - {name: is_deleted, data_type: bool, description: "True on the last version of a complaint that was removed from the source."}
+
+  - name: fct_scam_alerts
+    description: >
+      Weekly scam signals: a fraud category for one company or state rising against its
+      own baseline. Triage signals, not detected fraud. Rule in docs/alert-rule.md.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: alert_key, data_type: string, data_tests: [unique, not_null]}
+      - {name: week_start, data_type: date}
+      - name: week_start_date_key
+        data_type: int64
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_date'), field: date_key}
+      - name: scope
+        data_type: string
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [company, state]
+      - name: company_key
+        data_type: string
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_company'), field: company_key}
+              config: {severity: warn}
+      - name: geography_key
+        data_type: string
+        data_tests:
+          - relationships:
+              arguments: {to: ref('dim_geography'), field: geography_key}
+      - {name: fraud_category, data_type: string}
+      - {name: complaint_count, data_type: int64}
+      - {name: baseline_median, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: baseline_scale, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: robust_z_score, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: lift, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: fraud_share_lift, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: rate_per_billion_assets, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: rate_per_100k_population, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - name: severity
+        data_type: string
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [none, medium, high, critical]
+      - name: alert_status
+        data_type: string
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [active, withdrawn]
+      - {name: first_raised_date, data_type: date, description: "Snapshot date on which this pipeline first raised the alert."}
+      - {name: last_evaluated_date, data_type: date}
+      - {name: alert_rule_version, data_type: string}
+
+  - name: fct_alert_backtest
+    description: The alert rule replayed over history, one row per week.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: week_start, data_type: date, data_tests: [unique, not_null]}
+      - {name: week_start_date_key, data_type: int64}
+      - {name: alert_rule_version, data_type: string}
+      - {name: series_evaluated, data_type: int64}
+      - {name: alerts_raised, data_type: int64}
+      - {name: alert_rate, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: repeat_rate_next_week, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+
+  - name: alert_digest
+    description: Active signals for the most recently evaluated week; the content of the weekly digest.
+    config:
+      contract: {enforced: true}
+    columns:
+      - {name: week_start, data_type: date}
+      - {name: scope, data_type: string}
+      - {name: entity_name, data_type: string}
+      - {name: fraud_category, data_type: string}
+      - {name: complaint_count, data_type: int64}
+      - {name: baseline_median, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: robust_z_score, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: lift, data_type: "{{ 'float64' if target.type == 'bigquery' else 'double' }}"}
+      - {name: severity, data_type: string}
+      - {name: first_raised_date, data_type: date}

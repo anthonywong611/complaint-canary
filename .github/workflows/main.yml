@@ -1,0 +1,136 @@
+# A merge to main deploys PROD, and only the exact image that passed QA.
+# Nothing is built here. Run by hand with a source hash to roll back.
+name: main
+
+on:
+  push:
+    branches: [main]
+    # Paths that go into the image. Other changes have nothing to deploy.
+    paths:
+      - "src/**"
+      - "dbt/**"
+      - "deploy/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".python-version"
+  workflow_dispatch:
+    inputs:
+      source_hash:
+        description: Roll back to the QA-passed image with this source hash (see an earlier run's summary).
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy-prod:
+    name: PROD
+    runs-on: ubuntu-latest
+    environment: prod
+    timeout-minutes: 30
+    env:
+      IMAGE: ${{ vars.GCP_IMAGE }}
+      UPSTREAM_IMAGE: ${{ vars.GCP_UPSTREAM_IMAGE }}
+    outputs:
+      digest: ${{ steps.marker.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: source
+        uses: ./.github/actions/source-hash
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+      - uses: docker/setup-buildx-action@v3
+
+      # Fails closed: without a QA marker for this exact source there is nothing to deploy.
+      - id: marker
+        name: Find the QA-passed image
+        run: |
+          source_hash="${{ inputs.source_hash || steps.source.outputs.hash }}"
+          digest="$(gcloud artifacts docker images describe "${UPSTREAM_IMAGE}:qa-passed-${source_hash}" \
+            --format='value(image_summary.digest)' 2> /dev/null || true)"
+          if [ -z "${digest}" ]; then
+            echo "::error::No QA-passed image for source hash ${source_hash}. Push the branch again, up to date with main, and let branch.yml finish."
+            exit 1
+          fi
+          echo "source_hash=${source_hash}" >> "$GITHUB_OUTPUT"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy the image from QA, unchanged
+        run: |
+          source_hash="${{ steps.marker.outputs.source_hash }}"
+          digest="${{ steps.marker.outputs.digest }}"
+          if ! gcloud artifacts docker images describe "${IMAGE}:${source_hash}" > /dev/null 2>&1; then
+            docker buildx imagetools create --tag "${IMAGE}:${source_hash}" "${UPSTREAM_IMAGE}@${digest}"
+          fi
+          copied="$(gcloud artifacts docker images describe "${IMAGE}:${source_hash}" \
+            --format='value(image_summary.digest)')"
+          if [ "${copied}" != "${digest}" ]; then
+            echo "::error::Digest changed in transit: ${copied} is not ${digest}."
+            exit 1
+          fi
+
+      - uses: ./.github/actions/vm-deploy
+        with:
+          image: ${{ vars.GCP_IMAGE }}@${{ steps.marker.outputs.digest }}
+          project: ${{ vars.GCP_PROJECT_ID }}
+          zone: ${{ vars.GCP_VM_ZONE }}
+          vm: ${{ vars.GCP_VM_NAME }}
+
+      - run: |
+          echo "PROD now runs ${IMAGE}@${{ steps.marker.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Source hash (use it to roll back to this release): ${{ steps.marker.outputs.source_hash }}" >> "$GITHUB_STEP_SUMMARY"
+
+  docs:
+    name: Publish dbt docs
+    needs: deploy-prod
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+
+      # The catalogue and lineage are generated from a fixture run on DuckDB: the same
+      # models and columns as PROD, without giving this job warehouse access.
+      - name: Generate
+        env:
+          CANARY_CFPB_URL: data/fixture/day1/complaints.csv.zip
+          CANARY_FDIC_URL: data/fixture/fdic_institutions.json
+          CANARY_CENSUS_URL: data/fixture/census_state_population.csv
+        run: |
+          uv run canary fixture
+          uv run canary run
+          CANARY_DUCKDB_PATH="${PWD}/data/warehouse.duckdb" uv run dbt docs generate \
+            --project-dir dbt --profiles-dir dbt --target local --target-path "${PWD}/site" \
+            --vars '{"snapshot_date": "2026-09-30"}'
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: pages
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,33 @@
+# SQL is linted as BigQuery, the production dialect. Macros that differ by warehouse
+# render their BigQuery branch here, so the linter parses what BigQuery will run.
+[sqlfluff]
+dialect = bigquery
+templater = jinja
+max_line_length = 120
+exclude_rules = structure.column_order, ambiguous.column_references, ambiguous.column_count, references.qualification, structure.using
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = True
+load_macros_from_path = dbt/macros
+library_path = tools/sqlfluff_library
+
+[sqlfluff:templater:jinja:context]
+target = {"type": "bigquery", "database": "example-project"}
+
+[sqlfluff:indentation]
+tab_space_size = 4
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.types]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.identifiers]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.literals]
+capitalisation_policy = lower

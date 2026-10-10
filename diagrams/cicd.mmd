@@ -1,0 +1,19 @@
+flowchart TD
+  subgraph branch.yml: push to a feature branch
+    P[Push] --> CI[Lint, tests, dbt build on DuckDB, Terraform validate, Docker build]
+    CI --> Q{Source hash already QA-passed?}
+    Q -- yes --> SKIP[Nothing to deploy]
+    Q -- no --> E{Image for this source hash exists?}
+    E -- no --> B[Build image; tag = source hash; label = commit SHA]
+    E -- yes --> D1
+    B --> D1[Deploy DEV; run pipeline on 5% sample]
+    D1 --> D2[Copy digest to QA; deploy QA; run pipeline on full data]
+    D2 --> T[Add tag qa-passed-SOURCEHASH to that digest]
+  end
+  subgraph main.yml: merge to main
+    M[Merge] --> V{Tag qa-passed-SOURCEHASH exists?}
+    V -- no --> X[Fail: re-run the branch]
+    V -- yes --> D3[Copy that digest to PROD registry; deploy PROD by digest]
+    D3 --> DOC[Publish dbt docs]
+  end
+  T -.-> M

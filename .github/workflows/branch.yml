@@ -1,0 +1,218 @@
+# Every push to a feature branch: checks, then DEV on a sample, then QA on full data.
+# An image that passes QA is marked, and only a marked image can reach PROD (main.yml).
+name: branch
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+# A newer push to the same branch supersedes the older run.
+concurrency:
+  group: branch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      source_hash: ${{ steps.source.outputs.hash }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Lint Python
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+
+      - name: Lint SQL (BigQuery dialect)
+        run: uv run sqlfluff lint dbt
+
+      - name: Test (unit tests, and the full pipeline with dbt build on DuckDB)
+        run: uv run pytest
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.16"
+
+      - name: Check Terraform
+        working-directory: terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: Build the image
+        run: docker build --tag complaint-canary:ci .
+
+      - id: source
+        uses: ./.github/actions/source-hash
+
+  qa-status:
+    name: Has this source already passed QA?
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: qa
+    outputs:
+      passed: ${{ steps.marker.outputs.passed }}
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - id: marker
+        run: |
+          if gcloud artifacts docker images describe \
+            "${{ vars.GCP_IMAGE }}:qa-passed-${{ needs.ci.outputs.source_hash }}" > /dev/null 2>&1; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "This source already passed QA; DEV and QA deploys are skipped."
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build image once
+    needs: [ci, qa-status]
+    if: needs.qa-status.outputs.passed != 'true'
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.result.outputs.digest }}
+    env:
+      IMAGE: ${{ vars.GCP_IMAGE }}
+      SOURCE_HASH: ${{ needs.ci.outputs.source_hash }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+      - uses: docker/setup-buildx-action@v3
+
+      # Registry tags are immutable, so an image for this source is built at most once.
+      - id: existing
+        run: |
+          digest="$(gcloud artifacts docker images describe "${IMAGE}:${SOURCE_HASH}" \
+            --format='value(image_summary.digest)' 2> /dev/null || true)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        if: steps.existing.outputs.digest == ''
+        run: |
+          docker buildx build --push --provenance=false \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.ref.name=${GITHUB_REF_NAME}" \
+            --label "io.complaint-canary.source-hash=${SOURCE_HASH}" \
+            --tag "${IMAGE}:${SOURCE_HASH}" \
+            --metadata-file build-metadata.json .
+
+      - id: result
+        run: |
+          digest="${{ steps.existing.outputs.digest }}"
+          if [ -z "${digest}" ]; then digest="$(jq -r '."containerimage.digest"' build-metadata.json)"; fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Image: ${IMAGE}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-dev:
+    name: DEV (5% sample)
+    needs: [ci, build]
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 60
+    # One deploy at a time per environment; DEV and QA are shared by all branches.
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - uses: ./.github/actions/vm-deploy
+        with:
+          image: ${{ vars.GCP_IMAGE }}@${{ needs.build.outputs.digest }}
+          run_pipeline: "true"
+          project: ${{ vars.GCP_PROJECT_ID }}
+          zone: ${{ vars.GCP_VM_ZONE }}
+          vm: ${{ vars.GCP_VM_NAME }}
+
+      - name: Stop the VM
+        if: always()
+        run: |
+          gcloud compute instances stop "${{ vars.GCP_VM_NAME }}" --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_VM_ZONE }}" --quiet
+
+  deploy-qa:
+    name: QA (full data)
+    needs: [ci, build, deploy-dev]
+    runs-on: ubuntu-latest
+    environment: qa
+    timeout-minutes: 150
+    concurrency:
+      group: deploy-qa
+      cancel-in-progress: false
+    env:
+      IMAGE: ${{ vars.GCP_IMAGE }}
+      UPSTREAM_IMAGE: ${{ vars.GCP_UPSTREAM_IMAGE }}
+      SOURCE_HASH: ${{ needs.ci.outputs.source_hash }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Copy the image from DEV, unchanged
+        run: |
+          if ! gcloud artifacts docker images describe "${IMAGE}:${SOURCE_HASH}" > /dev/null 2>&1; then
+            docker buildx imagetools create --tag "${IMAGE}:${SOURCE_HASH}" "${UPSTREAM_IMAGE}@${DIGEST}"
+          fi
+          copied="$(gcloud artifacts docker images describe "${IMAGE}:${SOURCE_HASH}" \
+            --format='value(image_summary.digest)')"
+          if [ "${copied}" != "${DIGEST}" ]; then
+            echo "::error::Digest changed in transit: ${copied} is not ${DIGEST}."
+            exit 1
+          fi
+
+      - uses: ./.github/actions/vm-deploy
+        with:
+          image: ${{ vars.GCP_IMAGE }}@${{ needs.build.outputs.digest }}
+          run_pipeline: "true"
+          project: ${{ vars.GCP_PROJECT_ID }}
+          zone: ${{ vars.GCP_VM_ZONE }}
+          vm: ${{ vars.GCP_VM_NAME }}
+
+      # One marker per image, never a shared floating tag.
+      - name: Mark the image as QA-passed
+        run: |
+          gcloud artifacts docker tags add "${IMAGE}@${DIGEST}" "${IMAGE}:qa-passed-${SOURCE_HASH}"
+          echo "QA passed: ${IMAGE}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop the VM
+        if: always()
+        run: |
+          gcloud compute instances stop "${{ vars.GCP_VM_NAME }}" --project "${{ vars.GCP_PROJECT_ID }}" \
+            --zone "${{ vars.GCP_VM_ZONE }}" --quiet

@@ -1,0 +1,42 @@
+version: 2
+
+seeds:
+  - name: fraud_taxonomy
+    description: >
+      Every CFPB issue and sub-issue label that looks fraud-related, reviewed and mapped
+      to a stable fraud category. Covers labels from before and after CFPB's 2017-04-24
+      reorganisation. Labels not listed are not fraud.
+    columns:
+      - name: issue
+        data_tests: [not_null]
+      - name: fraud_category
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [scam, unauthorized_transaction, identity_theft, fraud_alert_handling, not_fraud]
+
+  - name: company_overrides
+    description: >
+      Curated entity type for the highest-volume complaint companies, with the FDIC
+      certificate for banks whose complaint name does not match their FDIC name.
+    config:
+      column_types:
+        fdic_cert: int64
+    columns:
+      - name: company_name
+        data_tests: [not_null, unique]
+      - name: entity_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [bank, credit_union, non_bank]
+
+  - name: state_codes
+    description: State and territory codes as they appear in CFPB complaints, with Census FIPS codes.
+    config:
+      column_types:
+        state_fips: string
+    columns:
+      - name: state_code
+        data_tests: [not_null, unique]

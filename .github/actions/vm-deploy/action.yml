@@ -1,0 +1,52 @@
+name: Deploy to VM
+description: Start the environment's VM if needed, wait for it, and run the deploy script over IAP SSH.
+inputs:
+  image:
+    description: Image reference by digest.
+    required: true
+  run_pipeline:
+    description: Run the pipeline once after deploying and fail if it fails.
+    default: "false"
+  project:
+    required: true
+  zone:
+    required: true
+  vm:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Start the VM
+      shell: bash
+      run: |
+        status="$(gcloud compute instances describe "${{ inputs.vm }}" --project "${{ inputs.project }}" \
+          --zone "${{ inputs.zone }}" --format='value(status)')"
+        if [ "${status}" != "RUNNING" ]; then
+          gcloud compute instances start "${{ inputs.vm }}" --project "${{ inputs.project }}" \
+            --zone "${{ inputs.zone }}" --quiet
+        fi
+
+    - name: Wait for the start-up script
+      shell: bash
+      run: |
+        for attempt in $(seq 1 60); do
+          if gcloud compute ssh "${{ inputs.vm }}" --project "${{ inputs.project }}" --zone "${{ inputs.zone }}" \
+            --tunnel-through-iap --quiet --strict-host-key-checking=no \
+            --command "test -f /opt/canary/ready" 2> /dev/null; then
+            echo "VM ready after ${attempt} attempt(s)."
+            exit 0
+          fi
+          sleep 10
+        done
+        echo "::error::The VM did not become ready. Check /var/log/canary-startup.log on the VM."
+        exit 1
+
+    - name: Deploy
+      shell: bash
+      run: |
+        mode=""
+        if [ "${{ inputs.run_pipeline }}" = "true" ]; then mode="--run"; fi
+        gcloud compute ssh "${{ inputs.vm }}" --project "${{ inputs.project }}" --zone "${{ inputs.zone }}" \
+          --tunnel-through-iap --quiet --strict-host-key-checking=no \
+          --command "sudo /opt/canary/deploy.sh '${{ inputs.image }}' '${{ github.sha }}' ${mode}" \
+          -- -o ServerAliveInterval=30 -o ServerAliveCountMax=10
