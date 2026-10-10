@@ -185,15 +185,16 @@ jobs:
       - run: gcloud auth configure-docker "${{ vars.GCP_REGION }}-docker.pkg.dev" --quiet
       - uses: docker/setup-buildx-action@v3
 
+      # A carbon copy: by default imagetools wraps a single image in a new index, which
+      # changes the digest. The copy is found by digest, so the tag only has to be unique.
       - name: Copy the image from DEV, unchanged
         run: |
-          if ! gcloud artifacts docker images describe "${IMAGE}:${SOURCE_HASH}" > /dev/null 2>&1; then
-            docker buildx imagetools create --tag "${IMAGE}:${SOURCE_HASH}" "${UPSTREAM_IMAGE}@${DIGEST}"
+          if ! gcloud artifacts docker images describe "${IMAGE}@${DIGEST}" > /dev/null 2>&1; then
+            docker buildx imagetools create --prefer-index=false \
+              --tag "${IMAGE}:sha256-${DIGEST#sha256:}" "${UPSTREAM_IMAGE}@${DIGEST}"
           fi
-          copied="$(gcloud artifacts docker images describe "${IMAGE}:${SOURCE_HASH}" \
-            --format='value(image_summary.digest)')"
-          if [ "${copied}" != "${DIGEST}" ]; then
-            echo "::error::Digest changed in transit: ${copied} is not ${DIGEST}."
+          if ! gcloud artifacts docker images describe "${IMAGE}@${DIGEST}" > /dev/null 2>&1; then
+            echo "::error::The copy did not keep the digest ${DIGEST}."
             exit 1
           fi
 
