@@ -1,19 +1,22 @@
 flowchart TD
-  subgraph branch.yml: push to a feature branch
-    P[Push] --> CI[Lint, tests, dbt build on DuckDB, Terraform validate, Docker build]
-    CI --> Q{Source hash already QA-passed?}
+  subgraph BR[branch.yml: push to a feature branch]
+    P[Push] --> CI[Lint and test: ruff, sqlfluff, pytest with dbt build on DuckDB, Terraform validate, Docker build]
+    CI --> Q{Source hash already marked qa-passed?}
     Q -- yes --> SKIP[Nothing to deploy]
-    Q -- no --> E{Image for this source hash exists?}
-    E -- no --> B[Build image; tag = source hash; label = commit SHA]
+    Q -- no --> E{Image for this source hash in the DEV registry?}
+    E -- no --> B[Build and push once: tag = source hash, label = commit SHA]
     E -- yes --> D1
-    B --> D1[Deploy DEV; run pipeline on 5% sample]
-    D1 --> D2[Copy digest to QA; deploy QA; run pipeline on full data]
-    D2 --> T[Add tag qa-passed-SOURCEHASH to that digest]
+    B --> D1[DEV: start VM, deploy by digest, run pipeline on a 5 percent sample, stop VM]
+    D1 --> C2[Carbon-copy the digest to the QA registry, verify it is unchanged]
+    C2 --> D2[QA: start VM, deploy by digest, run pipeline on full data, stop VM]
+    D2 --> T[Tag that digest qa-passed-SOURCEHASH]
   end
-  subgraph main.yml: merge to main
-    M[Merge] --> V{Tag qa-passed-SOURCEHASH exists?}
-    V -- no --> X[Fail: re-run the branch]
-    V -- yes --> D3[Copy that digest to PROD registry; deploy PROD by digest]
-    D3 --> DOC[Publish dbt docs]
+  subgraph MN[main.yml: merge to main]
+    M[Merge] --> V{Tag qa-passed-SOURCEHASH exists in the QA registry?}
+    V -- no --> X[Fail closed: re-run the branch]
+    V -- yes --> C3[Carbon-copy that digest to the PROD registry, verify it is unchanged]
+    C3 --> D3[PROD: deploy by digest]
+    D3 --> DOC[Publish dbt docs to GitHub Pages]
   end
   T -.-> M
+  RB[Run main.yml by hand with an earlier source hash] -. rollback .-> V

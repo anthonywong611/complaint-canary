@@ -1,14 +1,15 @@
 flowchart TD
-  a[Download zip; record ETag, size, checksum] --> g{Newer than the last applied snapshot?}
-  g -- no --> q2[Refuse; alert]
+  a[Check the CFPB file: ETag, size, last-modified] --> g{Compared with the last applied snapshot}
+  g -- older, or same date but a different file --> q2[Refuse, emit snapshot_refused]
   g -- same file --> j
-  g -- yes --> b[Verify zip CRC and 15-column header]
-  b --> c[Stream to Parquet, fixed schema]
-  c --> d[Store in landing/cfpb/dt=YYYY-MM-DD]
-  d --> e[Load raw.complaints_snapshot partition]
-  e --> f{Integrity gate: dbt tests on the partition}
-  f -- fail --> q[Mark snapshot rejected; history and marts unchanged; alert]
-  f -- pass --> h[dbt snapshot: SCD2 by row hash]
-  h --> j[dbt build: staging, intermediate, marts + tests]
-  j -- tests pass --> l[Mark snapshot published; write digest]
-  j -- tests fail --> q3[No publication; alert]
+  g -- newer --> b[Download, verify size, zip CRC and the 15-column header]
+  b -- corrupt or wrong columns --> q0[Fail before landing, emit run_failure]
+  b --> c[Stream to Parquet with a fixed schema, DEV keeps a stable 5 percent sample]
+  c --> d[Store in landing zone: cfpb/dt=YYYY-MM-DD]
+  d --> e[Load the raw.complaints_snapshot partition]
+  e --> f{Integrity gate: 5 dbt tests on the partition}
+  f -- fail --> q[Ledger: rejected. History and marts unchanged, emit snapshot_rejected]
+  f -- pass --> h[dbt snapshot: SCD2 by row hash, stamped with the snapshot date]
+  h --> j[dbt build: staging, intermediate, marts, each followed by its tests]
+  j -- a test fails --> q3[Nothing published, emit run_failure]
+  j -- all pass --> l[Ledger: published. Write digest, emit snapshot_published]

@@ -2,22 +2,159 @@
 
 Fraud and scam early-warning signals from public consumer complaints.
 
-Banks and regulators usually notice a new scam, or a company whose customers are being hit, weeks late. Complaint Canary ingests the CFPB Consumer Complaint Database every day (18.3 million complaints), tracks how each complaint changes, classifies the fraud-related ones, and flags companies and states whose fraud complaints rise sharply against their own baseline.
+Banks and regulators usually notice a new scam, or a company whose customers are being hit, weeks late. The US Consumer Financial Protection Bureau (CFPB) publishes every complaint it receives, 18.3 million so far and about 27,000 more each day, but only as one large file with no change history.
 
-It is built for fraud-strategy analysts, compliance teams and regulators, and as a reference data-engineering project: a daily ELT pipeline with an integrity gate, SCD2 history, a star schema, three environments, and build-once promotion.
+Complaint Canary ingests that file daily, tracks how each complaint changes, classifies the fraud-related ones, and flags companies and states whose fraud complaints rise sharply against their own baseline. It serves fraud-strategy analysts, compliance teams and regulators.
 
 Complaints are self-reported and lag the events they describe. The alerts are triage signals for an analyst, not detected fraud.
 
-## Status and key links
+# Architecture
 
-- **Status**: version 0.1.0. Runs locally end to end; cloud deployment is verified by the owner per environment.
-- **Design**: [docs/planning/iteration-5.md](docs/planning/iteration-5.md) (approved plan), [docs/alert-rule.md](docs/alert-rule.md), [docs/runbook.md](docs/runbook.md)
-- **Diagrams**: [diagrams/](diagrams/)
-- **Data catalogue and lineage (demo)**: dbt docs on GitHub Pages, `https://<owner>.github.io/complaint-canary/`, published by the `main` workflow
-- **Issue tracker**: GitHub Issues on this repository
-- **Licence**: [MIT](LICENSE). Source data: CFPB (CC0), FDIC and US Census Bureau (public domain).
+![Architecture](diagrams/architecture.png)
 
-## Quick start
+Source: [diagrams/architecture.drawio](diagrams/architecture.drawio) (open in [draw.io](https://app.diagrams.net)).
+
+| Source Data | Description |
+|---|---|
+| CFPB (CC0) | The [Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/): every complaint the bureau has published since 2011, as one zipped CSV (353 MB, 18.3 million rows, 15 columns) rebuilt daily. Each row has the product, issue, company, state, ZIP code, dates and the company's response; there are no names or narratives. The file carries no change history, so the pipeline downloads it in full each day and works out what changed. It is the core of the project: every complaint, alert and history table derives from it. |
+| FDIC | The [BankFind Suite API](https://api.fdic.gov/banks/docs/), `/institutions` endpoint: about 4,200 active FDIC-insured banks with their certificate number, holding company, charter class and total assets. A paginated JSON API with no key, refreshed weekly. It is used to tell banks from non-banks among the complaint companies and to size them, so alerts can be read per billion dollars of assets. |
+| US Census Bureau (public domain) | [State population estimates](https://www.census.gov/programs-surveys/popest.html): one CSV with a yearly population figure per state, the District of Columbia and Puerto Rico, from 2020 on. Refreshed yearly. It is used to express state-level alerts per 100,000 residents, so large states do not dominate. |
+
+| Component | Role |
+|---|---|
+| Compute Engine VM | Runs Dagster (schedule, sensors, UI) and the pipeline in Docker Compose. Disposable: all pipeline state is in Cloud Storage and BigQuery. |
+| Cloud Storage | Landing zone. One immutable Parquet file per daily snapshot, kept 90 days in PROD so history can be replayed. |
+| BigQuery | Warehouse, one dataset per layer: `raw`, `snapshots` (SCD2), `staging`, `intermediate`, `marts`, `ops`. dbt transforms in place (ELT). |
+| Artifact Registry | One image per source version, with immutable tags. |
+| Cloud Logging and Monitoring | The pipeline emits structured events; alert policies on them send email. |
+| Identity-Aware Proxy | The only way into the VM. No public ports. |
+| GitHub Actions | Builds, tests and deploys with short-lived tokens (Workload Identity Federation). |
+
+# Pipeline Flow
+
+1. **Ingest**: download the CFPB file, verify its size, checksum and 15-column header, and stream it to Parquet in the landing zone.
+2. **Gate**: load the snapshot to `raw` and run five dbt tests on it (IDs, dates, row count against the last snapshot, share of complaints that would be deleted). A snapshot that fails is rejected and changes nothing.
+3. **History**: a dbt snapshot records new, changed and removed complaints as SCD2 rows, stamped with the snapshot date so a re-run or replay gives the same result.
+4. **Model**: dbt builds staging, intermediate and mart models, running each model's tests before anything downstream.
+5. **Publish**: the ledger row is marked published, the digest is written, and an event is emitted for monitoring.
+
+```mermaid
+flowchart TD
+  a[Check the CFPB file: ETag, size, last-modified] --> g{Compared with the last applied snapshot}
+  g -- older, or same date but a different file --> q2[Refuse, emit snapshot_refused]
+  g -- same file --> j
+  g -- newer --> b[Download, verify size, zip CRC and the 15-column header]
+  b -- corrupt or wrong columns --> q0[Fail before landing, emit run_failure]
+  b --> c[Stream to Parquet with a fixed schema, DEV keeps a stable 5 percent sample]
+  c --> d[Store in landing zone: cfpb/dt=YYYY-MM-DD]
+  d --> e[Load the raw.complaints_snapshot partition]
+  e --> f{Integrity gate: 5 dbt tests on the partition}
+  f -- fail --> q[Ledger: rejected. History and marts unchanged, emit snapshot_rejected]
+  f -- pass --> h[dbt snapshot: SCD2 by row hash, stamped with the snapshot date]
+  h --> j[dbt build: staging, intermediate, marts, each followed by its tests]
+  j -- a test fails --> q3[Nothing published, emit run_failure]
+  j -- all pass --> l[Ledger: published. Write digest, emit snapshot_published]
+```
+Source: [diagrams/pipeline.mmd](diagrams/architecture.mmd)
+
+The same code runs locally on DuckDB and in the cloud on BigQuery.
+
+# Data Model
+
+A star schema in the `marts` dataset. Keys only are shown here; every column is in [diagrams/data-model.mmd](diagrams/data-model.mmd) and in the dbt docs.
+
+```mermaid
+erDiagram
+  fct_complaints }o--|| dim_date : received_date_key
+  fct_complaints }o--|| dim_company : company_key
+  fct_complaints }o--|| dim_product : product_key
+  fct_complaints }o--|| dim_issue : issue_key
+  fct_complaints }o--|| dim_geography : geography_key
+  fct_complaint_status_history }o--|| fct_complaints : complaint_id
+  fct_scam_alerts }o--|| dim_date : week_start_date_key
+  fct_scam_alerts }o--o| dim_company : company_key
+  fct_scam_alerts }o--o| dim_geography : geography_key
+  fct_alert_backtest }o--|| dim_date : week_start_date_key
+  alert_digest }o--|| fct_scam_alerts : latest_week_active_alerts
+
+  fct_complaints {
+    int complaint_id PK
+    date received_date
+    string fraud_category
+    bool is_fraud_related
+    date first_observed_date
+  }
+  fct_complaint_status_history {
+    int complaint_id FK
+    date valid_from
+    date valid_to
+    string change_type
+    bool is_deleted
+  }
+  fct_scam_alerts {
+    string alert_key PK
+    date week_start
+    string scope
+    string fraud_category
+    int complaint_count
+    float robust_z_score
+    string severity
+    string alert_status
+  }
+  fct_alert_backtest {
+    date week_start PK
+    int series_evaluated
+    int alerts_raised
+  }
+  alert_digest {
+    date week_start
+    string entity_name
+    string severity
+  }
+  dim_company {
+    string company_key PK
+    string company_name
+    string entity_type
+    int fdic_cert
+    string asset_size_band
+  }
+  dim_product {
+    string product_key PK
+    string product
+    string sub_product
+  }
+  dim_issue {
+    string issue_key PK
+    string issue
+    string sub_issue
+    string fraud_category
+  }
+  dim_geography {
+    string geography_key PK
+    string state_name
+    int population
+  }
+  dim_date {
+    int date_key PK
+    date date_day
+    date week_start
+  }
+```
+
+| Table | What it serves |
+|---|---|
+| `fct_scam_alerts` | The product: one row per weekly signal, for a fraud category and a company or state, with its z-score, lift and severity. An alert that stops holding is marked `withdrawn`, never deleted. |
+| `fct_complaints` | One row per complaint currently in the CFPB database, with its fraud category. |
+| `fct_complaint_status_history` | Every observed version of every complaint: how company responses change and which complaints CFPB removes. |
+| `fct_alert_backtest` | The alert rule replayed over every week since 2018, to judge how noisy it is. |
+| `alert_digest` | Active signals for the latest evaluated week; the content of the weekly digest. |
+| `dim_company` | Complaint companies matched to FDIC institutions, with asset size for rates. |
+| `dim_issue` | CFPB issue labels mapped to a stable fraud category across both of CFPB's taxonomy eras. |
+| `ops.snapshot_ledger`, `ops.load_audit`, `ops.dq_results`, `ops.publication_lag` | Operations: what happened to each snapshot, step timings and bytes scanned, test results, CFPB's publishing delay. |
+
+How an alert is decided, and why each threshold has its value: [docs/alert-rule.md](docs/alert-rule.md).
+
+# Quick Start
 
 Prerequisites: [uv](https://docs.astral.sh/uv/) 0.12 or later. Python 3.14 is installed by uv. No cloud account is needed.
 
@@ -36,7 +173,7 @@ snapshot_date=2026-09-30  state=published  row_count=5119  new_count=5119  chang
 
 The fixture plants one scam spike. The digest it produces is in `data/landing/digests/`.
 
-## Usage
+# Usage
 
 | Task | Command |
 |---|---|
@@ -70,17 +207,7 @@ select week_start, scope, fraud_category, complaint_count, robust_z_score, sever
 from marts.fct_scam_alerts;
 ```
 
-Main tables:
-
-| Table | Content |
-|---|---|
-| `marts.fct_scam_alerts` | Weekly signals per fraud category and company or state |
-| `marts.fct_complaints` | One row per complaint, with dimensions `dim_company`, `dim_product`, `dim_issue`, `dim_geography`, `dim_date` |
-| `marts.fct_complaint_status_history` | Every observed version of every complaint |
-| `marts.fct_alert_backtest` | The alert rule replayed over history |
-| `ops.snapshot_ledger`, `ops.load_audit`, `ops.dq_results`, `ops.publication_lag` | Operations |
-
-## Configuration
+# Configuration
 
 Settings are environment variables, read from `.env` locally. [.env.example](.env.example) lists them all with safe placeholders. Never commit `.env`.
 
@@ -103,61 +230,7 @@ In the cloud these are written to the VM by Terraform. The only secret, the Dags
 
 Alert thresholds and gate limits are dbt variables in [dbt/dbt_project.yml](dbt/dbt_project.yml).
 
-## Architecture
-
-```mermaid
-flowchart LR
-  subgraph Sources
-    A[CFPB bulk zip]
-    B[FDIC BankFind API]
-    C[Census CSV]
-  end
-  subgraph ENV[GCP environment: dev, qa or prod]
-    subgraph VM[GCE VM: Docker Compose]
-      D[Dagster webserver + daemon]
-      E[Pipeline code: ingest, dbt]
-      P[(Postgres on separate disk)]
-    end
-    L[(GCS landing: Parquet, immutable)]
-    subgraph BQ[BigQuery]
-      R[raw]
-      S[snapshots SCD2]
-      T[staging / intermediate]
-      M[marts]
-      O[ops]
-    end
-    Mon[Cloud Logging + Monitoring]
-    Bud[Billing budget]
-    AR[Artifact Registry]
-  end
-  A & B & C --> E --> L --> R --> S --> T --> M
-  E --> O
-  D --> E
-  E --> Mon --> N[Email alerts]
-  Bud --> N
-  M --> U[Analysts / BI]
-  AR --> VM
-```
-
-One daily run:
-
-1. **Ingest**: download the CFPB bulk file, verify its checksum and its 15-column header, and stream it to Parquet in the landing zone.
-2. **Gate**: load the snapshot to `raw` and test it (IDs, dates, row count against the last snapshot, share of complaints that would be deleted). A snapshot that fails is rejected and changes nothing.
-3. **History**: a dbt snapshot records new, changed and removed complaints as SCD2 rows, stamped with the snapshot date so a re-run or replay gives the same result.
-4. **Model**: dbt builds staging, intermediate and mart models, running each model's tests before anything downstream.
-5. **Publish**: the ledger row is marked published, the digest is written, and an event is emitted for monitoring.
-
-| Concern | Choice |
-|---|---|
-| Orchestration | Dagster: every dbt model is an asset and every dbt test an asset check |
-| Transformation and data quality | dbt: tests, unit tests, enforced contracts on marts, source freshness |
-| Warehouse | BigQuery in the cloud, DuckDB locally and in CI; the same SQL runs on both |
-| Infrastructure | Terraform, one module, three environments |
-| CI/CD | GitHub Actions with Workload Identity Federation; no service-account keys |
-
-Other diagrams: [pipeline](diagrams/pipeline.mmd), [data model](diagrams/data-model.mmd), [CI/CD](diagrams/cicd.mmd).
-
-## Development guide
+# Development Guide
 
 ```bash
 make setup
@@ -185,7 +258,7 @@ Conventions:
 - Curated knowledge lives in seeds: `fraud_taxonomy.csv` and `company_overrides.csv`.
 - Python that Dagster inspects (`assets.py`, `definitions.py`) must not use `from __future__ import annotations`.
 
-## Testing
+# Testing
 
 ```bash
 make test
@@ -201,30 +274,65 @@ make test
 
 CI runs all of it on every push, on DuckDB. BigQuery is first exercised in DEV.
 
-## Deployment and operations
+# CI/CD Workflows
 
-### Environments
+The image is built once, on the feature branch, and the same image is promoted through the environments. Nothing is rebuilt for PROD.
 
 | | DEV | QA | PROD |
 |---|---|---|---|
-| Data | Stable 5% sample | Full | Full |
-| VM | Started by deploys, then stopped | Started by deploys, then stopped | Always on |
 | Deployed by | Push to a feature branch | The same push, after DEV passes | Merge to `main` |
+| Data | Stable 5% sample | Full | Full |
+| VM | Started for the deploy, then stopped | Started for the deploy, then stopped | Always on |
+| Purpose | First run on BigQuery | Rehearsal at real volume | Scheduled service, daily at 11:00 UTC |
 
-The image is built once, on the branch. Its tag is a hash of the Git tree entries that go into it, which is the same for a branch head and for its merge commit. QA marks the image it tested; `main` deploys only an image carrying that mark, by digest. See [diagrams/cicd.mmd](diagrams/cicd.mmd).
+```mermaid
+flowchart TD
+  subgraph BR[branch.yml: push to a feature branch]
+    P[Push] --> CI[Lint and test: ruff, sqlfluff, pytest with dbt build on DuckDB, Terraform validate, Docker build]
+    CI --> Q{Source hash already marked qa-passed?}
+    Q -- yes --> SKIP[Nothing to deploy]
+    Q -- no --> E{Image for this source hash in the DEV registry?}
+    E -- no --> B[Build and push once: tag = source hash, label = commit SHA]
+    E -- yes --> D1
+    B --> D1[DEV: start VM, deploy by digest, run pipeline on a 5 percent sample, stop VM]
+    D1 --> C2[Carbon-copy the digest to the QA registry, verify it is unchanged]
+    C2 --> D2[QA: start VM, deploy by digest, run pipeline on full data, stop VM]
+    D2 --> T[Tag that digest qa-passed-SOURCEHASH]
+  end
+  subgraph MN[main.yml: merge to main]
+    M[Merge] --> V{Tag qa-passed-SOURCEHASH exists in the QA registry?}
+    V -- no --> X[Fail closed: re-run the branch]
+    V -- yes --> C3[Carbon-copy that digest to the PROD registry, verify it is unchanged]
+    C3 --> D3[PROD: deploy by digest]
+    D3 --> DOC[Publish dbt docs to GitHub Pages]
+  end
+  T -.-> M
+  RB[Run main.yml by hand with an earlier source hash] -. rollback .-> V
+```
 
-### Prerequisites
+- **Image identity**: the tag is a hash of the Git tree entries that go into the image (`src`, `dbt`, `deploy`, `Dockerfile`, lock file). It is the same for a branch head and for its merge commit, which a commit SHA is not. Changes to docs, Terraform or workflows leave it unchanged, so they reuse the tested image.
+- **QA is the gate**: QA tags the exact digest it tested. `main` deploys only a digest carrying that tag, and fails if there is none.
+- **Unchanged in transit**: images are copied between the environments' registries as carbon copies and the digest is checked after each copy. Registry tags are immutable.
+- **Rollback**: run the `main` workflow by hand with an earlier source hash. Only QA-passed images can be deployed; there is no way to skip QA.
+- **Identity**: each environment has its own deploy identity. PROD's accepts tokens from the `main` branch only.
+- Terraform is applied by hand, not by the workflows.
+
+Workflow files: [branch.yml](.github/workflows/branch.yml), [main.yml](.github/workflows/main.yml).
+
+# Deployment and Operations
+
+## Prerequisites
 
 - A GCP account with billing, and three empty projects (or one shared project).
 - On your user: Owner on each project, and Billing Account Costs Manager for the budget alert.
 - Terraform 1.9 or later, the gcloud CLI, and `gcloud auth login` plus `gcloud auth application-default login`.
 - A GitHub repository. Environment branch rules and branch protection need a public repository or a paid plan.
 
-### Estimated cost
+## Estimated cost
 
 About $46 to $57 a month for all three environments in `us-central1`: PROD about $35 (the always-on `e2-medium` VM is $24.50), QA about $6, DEV about $5, plus up to $10 of BigQuery queries beyond the free 1 TiB. Prices were checked against secondary sources, not the official calculator; confirm before relying on them. Each environment has a budget alert (DEV 15, QA 15, PROD 70, in the billing account's currency; change `budget_amount` in `terraform/envs/<env>.tfvars` if that is not US dollars).
 
-### Deploy
+## Deploy
 
 1. Create a bucket for Terraform state:
    ```bash
@@ -235,24 +343,28 @@ About $46 to $57 a month for all three environments in `us-central1`: PROD about
    make tf-apply ENV=dev TF_STATE_BUCKET=<state-bucket>
    terraform -chdir=terraform output github_environment_variables
    ```
-3. In GitHub, create Environments `dev`, `qa` and `prod` and add the eight variables from that output to each. Limit `prod` to the `main` branch. Protect `main`: require a pull request, require the branch to be up to date, require the `branch` workflow. Set Pages to deploy from GitHub Actions.
-4. Push a feature branch. The `branch` workflow deploys DEV, then QA. The first QA run loads the full history.
-5. Open a pull request and merge it. The `main` workflow deploys PROD. PROD then runs daily at 11:00 UTC; to run it at once, use "Materialize all" in the Dagster UI.
+3. In GitHub, under Settings:
+   - **Environments**: create `dev`, `qa` and `prod`, and add the eight variables from that output to each. On `prod`, set "Deployment branches and tags" to `main` only.
+   - **Pages**: set the source to "GitHub Actions".
+   - **Branches**: protect `main`. Require a pull request and require branches to be up to date.
+4. Push a feature branch. The `branch` workflow deploys DEV, then QA. The first QA run loads the full history; it took about 8 minutes.
+5. Add the five jobs of the `branch` workflow as required status checks on `main`. GitHub lists a check only after it has run once, and treats a skipped job as passing, so require all five.
+6. Open a pull request and merge it. The `main` workflow deploys PROD, which then runs daily at 11:00 UTC. To run it at once, use "Materialize all" in the Dagster UI.
 
-### Monitor
+## Monitor
 
 - **Dagster UI**: `make ui-tunnel ENV=prod`, then http://localhost:3000.
 - **Email alerts** (Cloud Monitoring): run failed or snapshot rejected; no snapshot published in 26 hours; orchestrator heartbeat missing; data quality warning; VM disk or CPU; budget at 50, 80 and 100%.
 - **Dashboard**: "Complaint Canary (<env>)" in Cloud Monitoring.
 - **Tables**: `ops.snapshot_ledger`, `ops.load_audit`, `ops.dq_results`; failing rows in the `dq_failures` dataset.
 
-### Back up and restore
+## Back up and restore
 
 - SCD2 history is the only state that cannot be rebuilt from the source. It is protected by 90 days of landed snapshots (replayable), a weekly BigQuery table snapshot kept 4 weeks, and 7 days of time travel.
 - Dagster's run history sits on a separate disk with daily snapshots kept 7 days. Losing it does not affect the data.
 - Procedures: [docs/runbook.md](docs/runbook.md).
 
-### Troubleshoot
+## Troubleshoot
 
 [docs/runbook.md](docs/runbook.md) has a section per alert. Common first-deploy problems:
 
@@ -265,22 +377,50 @@ About $46 to $57 a month for all three environments in `us-central1`: PROD about
 | `main` fails with "No QA-passed image" | The merged branch was not up to date with `main`, or its `branch` run did not finish. Re-run the branch. |
 | Re-applying after a destroy fails on the workload identity pool | Deleted pools are kept for 30 days. Undelete it, or wait. |
 
-### Tear down
+## Stop the spend
+
+The PROD VM is most of the bill. Stopping it pauses the service and leaves everything else in place:
 
 ```bash
-make tf-destroy ENV=prod TF_STATE_BUCKET=<state-bucket>
-make tf-destroy ENV=qa TF_STATE_BUCKET=<state-bucket>
-make tf-destroy ENV=dev TF_STATE_BUCKET=<state-bucket>
-gcloud storage rm -r gs://<state-bucket>
+gcloud compute instances stop canary-prod --zone us-central1-a
 ```
 
-Destroy in that order: each environment holds a permission on the one before it. To pause spending without destroying anything, stop the PROD VM: `gcloud compute instances stop canary-prod`.
+Storage continues at about a dollar a month. To remove everything, see [Clean Up](#clean-up).
 
 ## Security and data handling
 
-- **Reporting a vulnerability**: use GitHub's private vulnerability reporting (Security → Report a vulnerability) on this repository. Please do not open a public issue.
-- **Data**: all three sources are public. Complaints carry no names or narratives. State and ZIP code are quasi-identifiers; `zip_code` is restricted by a BigQuery policy tag, and analysts are granted the marts without that tag's reader role.
-- **Access**: no inbound access to the VMs except SSH through Identity-Aware Proxy; the Dagster UI is reached through an SSH tunnel. Each environment has its own runtime and deploy identities with the roles they need. GitHub authenticates with short-lived tokens; the PROD identity accepts only the `main` branch.
+- **Reporting a vulnerability**: use GitHub's private vulnerability reporting (Security → Report a vulnerability). Please do not open a public issue.
+- **Data**: all three sources are public. Complaints carry no names or narratives. `zip_code` is restricted by a BigQuery policy tag; analysts are granted the marts without that tag's reader role.
+- **Access**: no inbound access to the VMs except SSH through Identity-Aware Proxy. Each environment has its own runtime and deploy identities.
 - **Secrets**: none in the repository or the image. `.env` and `*.local.tfvars` are git-ignored. Terraform state holds the generated database password, so keep the state bucket private.
-- **Retention**: landed snapshots 90 days in PROD (14 in QA, 7 in DEV); raw snapshot partitions 7 days; failing test rows 30 days; SCD2 history and marts until deleted. `terraform destroy` removes everything.
-- **Source terms**: requests use the HTTP client's default User-Agent and one download a day.
+- **Retention**: landed snapshots 90 days in PROD (14 in QA, 7 in DEV); raw snapshot partitions 7 days; failing test rows 30 days; SCD2 history and marts until deleted.
+
+# Clean Up
+
+This removes every deployed resource. It deletes all data, including the SCD2 history, which cannot be rebuilt once the landed snapshots are gone.
+
+1. Destroy the environments in reverse order. Each holds a permission on the one before it, so `dev` must go last.
+   ```bash
+   make tf-destroy ENV=prod TF_STATE_BUCKET=<state-bucket>
+   make tf-destroy ENV=qa TF_STATE_BUCKET=<state-bucket>
+   make tf-destroy ENV=dev TF_STATE_BUCKET=<state-bucket>
+   ```
+   Read each plan before confirming: it should list only `canary-<env>` resources.
+2. Delete the Terraform state bucket, once all three destroys have succeeded:
+   ```bash
+   gcloud storage rm -r gs://<state-bucket>
+   ```
+3. Check nothing billable is left in each project:
+   ```bash
+   gcloud compute instances list --project <project>
+   gcloud compute disks list --project <project>
+   gcloud compute snapshots list --project <project>
+   gcloud storage buckets list --project <project>
+   bq ls --project_id <project>
+   ```
+   Disk snapshots taken by the PROD backup schedule are kept by design when the disk is deleted; delete any that remain.
+4. If the projects were created only for this, delete them. That is the surest way to stop all charges: `gcloud projects delete <project>`.
+5. In GitHub: delete the `dev`, `qa`, `prod` and `github-pages` environments, and unpublish the Pages site if you no longer want it.
+6. Locally: `make down`, then remove `data/`, `.env`, `site/` and `terraform/envs/*.local.tfvars`.
+
+Two things to know before re-deploying after a clean-up: deleted workload identity pools and deleted projects are kept for 30 days, and their names cannot be reused until then.
