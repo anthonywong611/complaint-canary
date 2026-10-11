@@ -1,0 +1,127 @@
+erDiagram
+  fct_complaints }o--|| dim_date : received_date_key
+  fct_complaints }o--|| dim_company : company_key
+  fct_complaints }o--|| dim_product : product_key
+  fct_complaints }o--|| dim_issue : issue_key
+  fct_complaints }o--|| dim_geography : geography_key
+  fct_complaint_status_history }o--|| fct_complaints : complaint_id
+  fct_scam_alerts }o--|| dim_date : week_start_date_key
+  fct_scam_alerts }o--o| dim_company : company_key
+  fct_scam_alerts }o--o| dim_geography : geography_key
+  fct_alert_backtest }o--|| dim_date : week_start_date_key
+  alert_digest }o--|| fct_scam_alerts : latest_week_active_alerts
+
+  fct_complaints {
+    int complaint_id PK
+    date received_date
+    int received_date_key FK
+    int sent_to_company_date_key
+    string company_key FK
+    string product_key FK
+    string issue_key FK
+    string geography_key FK
+    string zip_code
+    string fraud_category
+    bool is_fraud_related
+    string submitted_via
+    string company_response
+    bool is_timely_response
+    bool is_older_american
+    bool is_servicemember
+    int days_to_send
+    date first_observed_date
+    bool is_backfill
+  }
+  fct_complaint_status_history {
+    int complaint_id FK
+    date valid_from
+    date valid_to
+    date previous_snapshot_date
+    string change_type
+    string company_response
+    string company_public_response
+    bool is_deleted
+  }
+  fct_scam_alerts {
+    string alert_key PK
+    date week_start
+    int week_start_date_key FK
+    string scope
+    string company_key FK
+    string geography_key FK
+    string fraud_category
+    int complaint_count
+    float baseline_median
+    float baseline_scale
+    float robust_z_score
+    float lift
+    float fraud_share_lift
+    float rate_per_billion_assets
+    float rate_per_100k_population
+    string severity
+    string alert_status
+    date first_raised_date
+    date last_evaluated_date
+    string alert_rule_version
+  }
+  fct_alert_backtest {
+    date week_start PK
+    int week_start_date_key FK
+    string alert_rule_version
+    int series_evaluated
+    int alerts_raised
+    float alert_rate
+    float repeat_rate_next_week
+  }
+  alert_digest {
+    date week_start
+    string scope
+    string entity_name
+    string fraud_category
+    int complaint_count
+    float baseline_median
+    float robust_z_score
+    float lift
+    string severity
+    date first_raised_date
+  }
+  dim_company {
+    string company_key PK
+    string company_name
+    string company_name_normalized
+    int fdic_cert
+    string fdic_name
+    string match_method
+    string entity_type
+    string asset_size_band
+    string charter_class
+    float total_assets_usd
+    bool is_bank
+    date fdic_as_of_date
+  }
+  dim_product {
+    string product_key PK
+    string product
+    string sub_product
+  }
+  dim_issue {
+    string issue_key PK
+    string issue
+    string sub_issue
+    string taxonomy_era
+    string fraud_category
+  }
+  dim_geography {
+    string geography_key PK
+    string state_code
+    string state_name
+    int population
+    int population_year
+  }
+  dim_date {
+    int date_key PK
+    date date_day
+    date week_start
+    int year
+    int month
+  }

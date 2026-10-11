@@ -1,0 +1,7 @@
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+# Not plain Jinja: the snapshot block and an adapter call.
+dbt/snapshots/
+dbt/tests/integrity_gate/gate_delete_guard.sql
+dbt/macros/

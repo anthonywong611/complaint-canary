@@ -1,0 +1,60 @@
+# Local stack: Dagster webserver and daemon, Postgres for Dagster's metadata, and a
+# DuckDB warehouse on a named volume. Copy .env.example to .env first.
+name: complaint-canary
+
+x-canary: &canary
+  build: .
+  image: complaint-canary:local
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DAGSTER_PG_HOST: postgres
+    DAGSTER_PG_USER: dagster
+    DAGSTER_PG_DB: dagster
+    DAGSTER_PG_PASSWORD: ${DAGSTER_PG_PASSWORD:?copy .env.example to .env and set DAGSTER_PG_PASSWORD}
+    CANARY_DUCKDB_PATH: /app/data/warehouse.duckdb
+    CANARY_LANDING_URI: /app/data/landing
+    CANARY_CFPB_URL: ${CANARY_CFPB_URL:-/app/data/fixture/day1/complaints.csv.zip}
+    CANARY_FDIC_URL: ${CANARY_FDIC_URL:-/app/data/fixture/fdic_institutions.json}
+    CANARY_CENSUS_URL: ${CANARY_CENSUS_URL:-/app/data/fixture/census_state_population.csv}
+  volumes:
+    - canary-data:/app/data
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: dagster
+      POSTGRES_DB: dagster
+      POSTGRES_PASSWORD: ${DAGSTER_PG_PASSWORD:?copy .env.example to .env and set DAGSTER_PG_PASSWORD}
+    volumes:
+      - dagster-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dagster -d dagster"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  webserver:
+    <<: *canary
+    command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-m", "complaint_canary.definitions"]
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  daemon:
+    <<: *canary
+    command: ["dagster-daemon", "run", "-m", "complaint_canary.definitions"]
+
+  # One-off commands: docker compose run --rm pipeline canary fixture
+  pipeline:
+    <<: *canary
+    profiles: ["job"]
+    command: ["canary", "run"]
+
+volumes:
+  canary-data:
+  dagster-postgres:

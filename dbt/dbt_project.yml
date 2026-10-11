@@ -1,0 +1,81 @@
+name: complaint_canary
+version: "0.1.0"
+config-version: 2
+profile: complaint_canary
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages", "logs"]
+
+vars:
+  # Set by the pipeline on every invocation.
+  snapshot_date: "1970-01-01"
+  gate_override: false
+
+  # Integrity gate.
+  gate_min_row_ratio: 0.995
+  gate_max_daily_growth: 0.01
+  gate_max_deleted_ratio: 0.005
+
+  # Fraud taxonomy.
+  taxonomy_cutoff: "2017-04-24"
+  fraud_label_pattern: "fraud|scam|theft|stolen|unauthori|not authorized|identity|impersonat|without my consent|didn't apply|did not (purchase|make)|not mine|someone else"
+
+  # Alert rule. Reasons for each value are in docs/alert-rule.md.
+  alert_rule_version: "v1"
+  backtest_start: "2018-01-01"
+  maturity_days: 15
+  baseline_weeks: 12
+  reevaluation_weeks: 8
+  min_baseline_median: 5
+  min_z_score: 3.5
+  min_lift: 1.5
+  min_excess: 10
+  min_share_lift: 1.2
+  high_z_score: 5
+  critical_z_score: 8
+
+  # Warnings.
+  lag_warn_share: 0.05
+  lag_min_volume: 20
+  unreviewed_top_n: 200
+  unreviewed_warn_share: 0.05
+  scale_warn_rows: 150000000
+  scale_warn_bytes_30d: 989560464998
+
+models:
+  complaint_canary:
+    +persist_docs:
+      relation: true
+      columns: true
+    +labels:
+      app: complaint-canary
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: table
+    marts:
+      +schema: marts
+      +materialized: table
+    ops:
+      +schema: ops
+      +materialized: table
+
+seeds:
+  complaint_canary:
+    +schema: staging
+
+snapshots:
+  complaint_canary:
+    +schema: snapshots
+
+data_tests:
+  complaint_canary:
+    +store_failures: true
+    +schema: dq_failures

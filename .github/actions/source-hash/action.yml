@@ -1,0 +1,20 @@
+name: Source hash
+description: >
+  Identity of the image a commit would build: a hash of the Git tree entries for every
+  path that goes into the image. A branch head and its merge or squash commit share it
+  when the branch is up to date, which a commit SHA does not. Changes outside these
+  paths (docs, Terraform, workflows) leave it unchanged.
+outputs:
+  hash:
+    description: 40-character source hash.
+    value: ${{ steps.hash.outputs.hash }}
+runs:
+  using: composite
+  steps:
+    - id: hash
+      shell: bash
+      run: |
+        hash="$(git ls-tree -r HEAD -- Dockerfile .dockerignore pyproject.toml uv.lock .python-version src dbt deploy \
+          | sha256sum | cut -c1-40)"
+        echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+        echo "Source hash: ${hash}"

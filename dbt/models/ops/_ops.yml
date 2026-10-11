@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: snapshot_changes
+    description: Complaints added, changed and removed by each applied snapshot.
+    columns:
+      - name: snapshot_date
+        data_tests: [unique, not_null]
+
+  - name: publication_lag
+    description: Share of newly observed complaints that were already older than the maturity window.
+    columns:
+      - name: snapshot_date
+        data_tests: [unique, not_null]

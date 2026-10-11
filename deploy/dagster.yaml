@@ -1,0 +1,32 @@
+# Dagster instance configuration for the containers (local Docker Compose and the cloud VMs).
+storage:
+  postgres:
+    postgres_db:
+      username:
+        env: DAGSTER_PG_USER
+      password:
+        env: DAGSTER_PG_PASSWORD
+      hostname:
+        env: DAGSTER_PG_HOST
+      db_name:
+        env: DAGSTER_PG_DB
+      port: 5432
+
+# One run at a time: a second snapshot run must never overlap the first.
+run_coordinator:
+  module: dagster.core.run_coordinator
+  class: QueuedRunCoordinator
+  config:
+    max_concurrent_runs: 1
+
+run_monitoring:
+  enabled: true
+  max_runtime_seconds: 7200
+
+python_logs:
+  python_log_level: INFO
+  managed_python_loggers:
+    - complaint-canary
+
+telemetry:
+  enabled: false

@@ -1,0 +1,22 @@
+# Copy to envs/<env>.local.tfvars (git-ignored), once per environment, and fill in.
+# With one shared project, use the same project_id in all three files.
+
+project_id        = "your-project-id"
+github_repository = "your-github-user/complaint-canary"
+alert_email       = "you@example.com"
+
+# Project of the environment this one promotes images from:
+# leave empty for dev; the dev project for qa; the qa project for prod.
+upstream_project_id = ""
+
+# Budget alert. Set enable_budget = false if you lack Billing Account Costs Manager.
+# Budgets are per project: with one shared project, enable it for prod only and add
+# budget_amount = 100 to that file. Amounts are in the billing account's currency.
+billing_account_id = "000000-000000-000000"
+enable_budget      = true
+
+# Column-level security on ZIP codes. Set to false if taxonomy creation is denied.
+enable_policy_tags = true
+
+# Optional: a Google group that may read the marts.
+analyst_group_email = ""
