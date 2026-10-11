@@ -128,7 +128,7 @@ jobs:
             --project-dir dbt --profiles-dir dbt --target local --target-path "${PWD}/site" \
             --vars '{"snapshot_date": "2026-09-30"}'
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
